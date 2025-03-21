@@ -1,7 +1,9 @@
 Build Kernel 3.4.67 MT6572
 
 ```sh
-cd 3467
-make O=~/3467/out/OBJ ARCH=arm CROSS_COMPILE=~/3467/toolchains/arm-eabi-4.8/bin/arm-eabi- muse72_s4_kk_debug_defconfig
-make O=~/3467/out/OBJ ARCH=arm CROSS_COMPILE=~/3467/toolchains/arm-eabi-4.8/bin/arm-eabi- -j4
+export ARCH=arm
+export CROSS_COMPILE=/home/user/arm-linu-androideabi-4.6/bin/arm-linux-androideabi-
+cd android_kernel_mt6572
+make muse72_s4_kk_debug_defconfig
+make -j4
 ```
