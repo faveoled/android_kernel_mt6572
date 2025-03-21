@@ -96,334 +96,6 @@
 
 /* ----------------------------------------------------------------------- */
 
-//__ADB_DEBUG__ start
-extern struct usb_ep	*ep_in;
-extern struct usb_ep	*ep_out;
-extern int bitdebug_enabled;
-extern unsigned bitdebug_writeCnt;
-extern unsigned bitdebug_readCnt;
-
-struct amessage {
-    unsigned command;       /* command identifier constant      */
-    unsigned arg0;          /* first argument                   */
-    unsigned arg1;          /* second argument                  */
-    unsigned data_length;   /* length of payload (0 is allowed) */
-    unsigned data_check;    /* checksum of data payload         */
-    unsigned magic;         /* command ^ 0xffffffff             */
-};
-
-struct debuginfo {
-	unsigned headtoken;
-	unsigned command;       /* command identifier constant      */
-	unsigned msg_check;
-	unsigned data_check;
-	unsigned count;
-	unsigned dummy;
-	unsigned tailtoken;
-};
-typedef struct amessage amessage;
-typedef struct debuginfo debuginfo;
-
-
-#define A_SYNC 0x434e5953
-#define A_CNXN 0x4e584e43
-#define A_OPEN 0x4e45504f
-#define A_OKAY 0x59414b4f
-#define A_CLSE 0x45534c43
-#define A_WRTE 0x45545257
-#define A_AUTH 0x48545541
-#define A_DBUG 0x41424a42
-#define DBGHEADTOKEN 0x13579bdf
-#define DBGTAILTOKEN 0xdca86420
-
-struct adbDbg_t{
-	u32 cmdChkSum;
-	u32 dataSize;
-	u32 dataChkSum;
-};
-
-typedef struct adbDbg_t adbDbg_t;
-
-adbDbg_t adbDbg[2] = {{0},{0}};
-adbDbg_t adbDbgTest;
-spinlock_t debugLock;
-
-struct kfifo fifo;
-#define FIFO_SIZE	32
-
-static u32 adbDoChkSum(u32 length, u8 *buf)
-{
-	u32 i;
-	u32 chkSum = 0;
-	for (i=0;i<length;i++)
-		chkSum ^= buf[i];
-	return chkSum;
-}
-
-static void adbCmdLog(u8 *buf, u32 length, u8 is_in, char *func)
-{
-	amessage *msg = (amessage*) buf;
-	int status = -1;
-
-
-	if(bitdebug_enabled == 1)
-	{
-		if(msg != NULL)
-		{
-			if(sizeof(amessage) == length)
-			{
-				switch(msg->command)
-				{
-					case A_SYNC:
-					case A_CNXN:
-					case A_OPEN:
-					case A_OKAY:
-					case A_CLSE:
-					case A_WRTE:
-					case A_AUTH:
-						status = 0;
-						break;
-					case A_DBUG:
-						printk(KERN_INFO "adb: %s ERROR A_DBUG should not be tranfsered \n", func);
-						break;
-					default:
-						status = 1;
-						break;
-				}
-			}
-			else
-			{
-				status = 1;
-				//printk(KERN_INFO "adb: %s A_DATA, data length = 0x%x \n", func, length);
-			}
-		}
-		else
-			printk(KERN_INFO "adb: %s ERROR: amessage = NULL \n", func);
-
-		if (0 == status)
-		{
-			adbDbg[is_in].dataSize  = msg->data_length;
-			adbDbg[is_in].cmdChkSum = adbDoChkSum(length, buf);
-
-			if(0 == adbDbg[is_in].dataSize)
-				adbDbg[is_in].dataChkSum = 0;
-
-			printk(KERN_INFO "adb: %s cmd = 0x%x, pack length = 0x%x, checksum = 0x%x \n", func, msg->command, msg->data_length, adbDbg[is_in].cmdChkSum);
-		}
-
-		if (1 == status)
-		{
-			if(adbDbg[is_in].dataSize != length)
-			{
-				if (0 != length)
-				  printk(KERN_INFO "adb: %s ERROR: data size not match, adbDbg.dataSize = 0x%x, actual = 0x%x \n", func, adbDbg[is_in].dataSize, length);
-			}
-			else
-			{
-				adbDbg[is_in].dataChkSum = adbDoChkSum(length, buf);
-				printk(KERN_INFO "adb: %s data length = 0x%x, checksum = 0x%x \n", func, length, adbDbg[is_in].dataChkSum);
-			}
-		}
-	}
-}
-
-static int adbDbgInfoCheck(u8 *buf, u32 length, u8 is_in, char *func)
-{
-	debuginfo *dbg = (debuginfo*) buf;
-	int status = -1;
-
-	if(dbg != NULL)
-	{
-		if(sizeof(debuginfo) == length)
-		{
-			switch(dbg->command)
-			{
-				case A_DBUG:
-					//printk(KERN_INFO "adb: %s dbg->headtoken = 0x%x, dbg->tailtoken = 0x%x, is_in = %d \n", func, dbg->headtoken , dbg->tailtoken, is_in);
-					//printk(KERN_INFO "adb: %s dbg->msg_check = 0x%x, dbg->data_check = 0x%x, is_in = %d \n", func, dbg->msg_check , dbg->data_check, is_in);
-					if(dbg->command == A_DBUG && dbg->headtoken == DBGHEADTOKEN && dbg->tailtoken == DBGTAILTOKEN)
-					{
-						status = 0;
-						if (adbDbg[is_in].cmdChkSum != dbg->msg_check)
-							printk(KERN_INFO "adb: %s ERROR: cmdChkSum = 0x%x, msg_check = 0x%x, is_in = %d \n", func, adbDbg[is_in].cmdChkSum, dbg->msg_check, is_in);
-						//else
-						//	printk(KERN_INFO "adb: %s cmdChkSum match, count = %d \n", func, bitdebug_writeCnt);
-
-
-						if (adbDbg[is_in].dataChkSum != dbg->data_check)
-							printk(KERN_INFO "adb: %s ERROR: dataChkSum = 0x%x, data_check = 0x%x, is_in = %d \n", func, adbDbg[is_in].dataChkSum, dbg->data_check, is_in);
-						//else
-						//	printk(KERN_INFO "adb: %s dataChkSum match, count = %d \n", func, bitdebug_writeCnt);
-
-						adbDbg[is_in].cmdChkSum = 0;
-						adbDbg[is_in].dataChkSum = 0;
-
-						if (bitdebug_writeCnt != dbg->count)
-							printk(KERN_INFO "adb: %s ERROR: miss count = %d, dbg->count = %d \n", func, bitdebug_writeCnt, dbg->count);
-
-						bitdebug_writeCnt++;
-					}
-					else
-						printk(KERN_INFO "adb: %s ERROR: not A_DBUG, data length = 0x%x, is_in = %d \n", func, length, is_in);
-					break;
-			}
-		}
-	}
-	else
-		printk(KERN_INFO "adb: %s ERROR: debuginfo = NULL, is_in = %d \n", func, is_in);
-
-	return status;
-}
-
-static int adbDebugInfoWrite(struct musb_ep *ep, struct usb_request *req)
-{
-	static u32  isDebugCmd = 0;
-	static bool isDataCmd = false;
-	static bool isNormalCmd = false;
-	static bool packLength = 0;
-	unsigned long flags;
-
-	if (!((1 == ep->is_in) && (ep_in == &(ep->end_point))))
-		return -1;
-
-	spin_lock_irqsave(&debugLock, flags);
-	if(req->length == sizeof(amessage)){
-		amessage *msg = (amessage*) req->buf;
-		if(msg != NULL){
-			switch(msg->command){
-				case A_SYNC:
-				case A_CNXN:
-				case A_OPEN:
-				case A_OKAY:
-				case A_CLSE:
-				case A_WRTE:
-				case A_AUTH:
-					isNormalCmd = true;
-					packLength = msg->data_length;
-					printk(KERN_INFO "adb: adb_complete_in msg (0x%x) (0x%x) (0x%x), isNormalCmd = %d \n", msg->command, msg->data_length, msg->data_check, isNormalCmd);
-					break;
-				default:
-					isDataCmd = true;
-					printk(KERN_INFO "adb: adb_complete_in msg A_DATA, isDataCmd = %d \n", isDataCmd);
-					break;
-			}
-		}
-	}
-	else
-		if(req->length == sizeof(debuginfo)){
-			debuginfo *dbg = (debuginfo*) req->buf;
-			if(dbg != NULL && dbg->command == A_DBUG && dbg->headtoken == DBGHEADTOKEN && dbg->tailtoken == DBGTAILTOKEN){
-				isDebugCmd++;
-				printk(KERN_INFO "adb: adb_complete_in A_DBUG (0x%x) (0x%x) (0x%x), isDebugCmd = %d \n", dbg->command, dbg->msg_check, dbg->data_check, isDebugCmd);
-				//if (false == isDataCmd)
-				//  printk(KERN_INFO "adb_complete_in dbg WARNING, Data is not ready \n");
-				kfifo_in(&fifo, dbg, sizeof(debuginfo));
-				//printk(KERN_INFO "adb_complete_in A_DBUG a \n");
-			}
-		else
-		{
-			isDataCmd = true;
-			printk(KERN_INFO "adb: adb_complete_in msg A_DATA, isDataCmd = %d \n", isDataCmd);
-		}
-	}
-	else
-	{
-		isDataCmd = true;
-		printk(KERN_INFO "adb: adb_complete_in msg A_DATA, isDataCmd = %d \n", isDataCmd);
-	}
-
-	if ((isNormalCmd && isDataCmd && isDebugCmd) || (isNormalCmd && (0 == packLength) && isDebugCmd))
-	{
-		debuginfo tmp;
-		unsigned int ret;
-		ret = kfifo_out(&fifo, &tmp, sizeof(debuginfo));
-		//printk(KERN_INFO "adb_complete_in kfifo_out = %d \n", isDebugCmd);
-		if(-1 < adbDbgInfoCheck((u8 *)&tmp, sizeof(debuginfo), 1, "adb_complete_in"))
-		{
-			isDebugCmd--;
-			isDataCmd  = false;
-			isNormalCmd = false;
-			packLength = 0;
-			//printk(KERN_INFO "adb_complete_in Clear  isDebugCmd = 0x%x, isDataCmd = %d, isNormalCmd = %d \n", isDebugCmd, isDataCmd, isNormalCmd);
-		}
-		else
-			printk(KERN_INFO "adb: adb_complete_in ERROR adbDbgInfoCheck = %d, headtoken = 0x%x, command = 0x%x, msg_check = 0x%x, data_check = 0x%x \n",
-			isDebugCmd, tmp.headtoken, tmp.command, tmp.msg_check, tmp.data_check);
-  }
-
-	spin_unlock_irqrestore(&debugLock, flags);
-	return 0;
-}
-
-static int adbDegInfoHandle(struct usb_ep *ep, struct usb_request *req, char *func)
-{
-	struct musb_ep		*musb_ep;
-	struct musb_request	*request;
-	int status = -1;
-
-	if(bitdebug_enabled == 1){
-		musb_ep = to_musb_ep(ep);
-		request = to_musb_request(req);
-
-		if((musb_ep->is_in == 0) && (ep_out == &(musb_ep->end_point)))
-		{
-			if(req->length == sizeof(debuginfo))
-			{
-				debuginfo *dbg = (debuginfo*) req->buf;
-				if(dbg != NULL && dbg->command == A_DBUG){
-					dbg->msg_check = adbDbg[musb_ep->is_in].cmdChkSum;
-					dbg->data_check = adbDbg[musb_ep->is_in].dataChkSum;
-					dbg->count = bitdebug_readCnt++;
-					//printk(KERN_INFO "adb: %s dbg (0x%x) (0x%x) (0x%x) \n", func, dbg->command, dbg->msg_check, dbg->data_check);
-					request->request.complete(&request->ep->end_point, &request->request);
-					return -EINPROGRESS;
-				}
-			}
-		}
-
-		if((musb_ep->is_in == 1) && (ep_in == &(musb_ep->end_point)))
-		{
-#if 0
-	    if(req->length == sizeof(amessage))
-	    {
-	  		amessage *msg = (amessage*) req->buf;
-	  		if(msg != NULL){
-	  			switch(msg->command){
-					case A_SYNC:
-					case A_CNXN:
-					case A_OPEN:
-					case A_OKAY:
-					case A_CLSE:
-					case A_WRTE:
-					case A_AUTH:
-	  					printk(KERN_INFO "adb: %s msg (0x%x) (0x%x) (0x%x) (0x%x) (0x%x) (0x%x) \n", func, msg->command, msg->arg0, msg->arg1,
-							msg->data_length, msg->data_check, msg->magic);
-	  					break;
-					default:
-						printk(KERN_INFO "adb: %s msg A_DATA or A_DBUG \n", func);
-						break;
-				}
-			}
-		}
-#endif
-			if(req->length == sizeof(debuginfo))
-			{
-				debuginfo *dbg = (debuginfo*) req->buf;
-				if(dbg != NULL && dbg->command == A_DBUG){
-					//printk(KERN_INFO "adb: %s dbg (0x%x) (0x%x) (0x%x) \n", func, dbg->command, dbg->msg_check, dbg->data_check);
-					adbDebugInfoWrite(musb_ep, req);
-					request->request.complete(&request->ep->end_point, &request->request);
-					return 0;
-				}
-			}
-		}
-	}
-
-	return status;
-}
-
-//__ADB_DEBUG__ end
-
 #define is_buffer_mapped(req) (is_dma_capable() && \
 					(req->map_state != UN_MAPPED))
 
@@ -538,11 +210,6 @@ __acquires(ep->musb->lock)
 				ep->end_point.name, request,
 				req->request.actual, req->request.length,
 				request->status);
-	//__ADB_DEBUG__ start
-	if(bitdebug_enabled == 1){
-		adbDebugInfoWrite(ep, request);
-	}
-	//__ADB_DEBUG__ end
 	req->request.complete(&req->ep->end_point, &req->request);
 	spin_lock(&musb->lock);
 	ep->busy = busy;
@@ -746,14 +413,6 @@ static void txstate(struct musb *musb, struct musb_request *req)
 			}
 			csr &= ~MUSB_TXCSR_P_UNDERRUN;
 
-			//__ADB_DEBUG__ start
-			if(bitdebug_enabled == 1){
-				if(ep_in == &(musb_ep->end_point)){
-					adbCmdLog(request->buf, request->length, musb_ep->is_in, "txstate");
-					//printk(KERN_INFO "adb: musb_g_tx length = 0x%x, actual = 0x%x, packet_sz = 0x%x \n", request->length, request->actual, musb_ep->packet_sz);
-				}
-			}
-			//__ADB_DEBUG__ end
 			musb_writew(epio, MUSB_TXCSR, csr);
 		}
 	}
@@ -811,13 +470,6 @@ void musb_g_tx(struct musb *musb, u8 epnum)
 
 	USB_LOGGER(MUSB_G_TX, MUSB_G_TX, musb_ep->end_point.name, csr);
 
-	//__ADB_DEBUG__ start
-	if(bitdebug_enabled == 1){
-		//if(ep_in == &(musb_ep->end_point)){
-		//	printk(KERN_INFO "adb: musb_g_tx length = 0x%x, csr = 0x%x, musb_ep->is_in = %d \n", request->length, csr, musb_ep->is_in);
-		//}
-	}
-	//__ADB_DEBUG__ end
 
 	dma = is_dma_capable() ? musb_ep->dma : NULL;
 
@@ -1206,15 +858,6 @@ static void rxstate(struct musb *musb, struct musb_request *req)
 	if (request->actual == request->length ||
 	    fifo_count < musb_ep->packet_sz)
 	{
-		//__ADB_DEBUG__ start
-		if(bitdebug_enabled == 1){
-			if(ep_out == &(musb_ep->end_point))
-			{
-				adbCmdLog(request->buf, request->actual, musb_ep->is_in, "rxstate");
-				//printk(KERN_INFO "adb: rxstate length = 0x%x, actual = 0x%x, len = 0x%x, packet_sz = 0x%x \n", request->length, request->actual, len, musb_ep->packet_sz);
-			}
-		}
-		//__ADB_DEBUG__ end
 		musb_g_giveback(musb_ep, request, 0);
 }
 }
@@ -1263,13 +906,6 @@ void musb_g_rx(struct musb *musb, u8 epnum)
 	csr = musb_readw(epio, MUSB_RXCSR);
 	dma = is_dma_capable() ? musb_ep->dma : NULL;
 
-	//__ADB_DEBUG__ start
-	if(bitdebug_enabled == 1){
-		//if(ep_out == &(musb_ep->end_point)){
-		//	printk(KERN_INFO "adb: musb_g_rx length = 0x%x, csr = 0x%x, musb_ep->is_in = %d \n", request->length, csr, musb_ep->is_in);
-		//}
-	}
-	//__ADB_DEBUG__ end
 
 	DBG(1, "<== %s, rxcsr %04x%s %p\n", musb_ep->end_point.name,
 			csr, dma ? " (dma)" : "", request);
@@ -1416,14 +1052,6 @@ void musb_g_rx(struct musb *musb, u8 epnum)
 			return;
 		}
 
-		//__ADB_DEBUG__ start
-		if(bitdebug_enabled == 1){
-			if(ep_out == &(musb_ep->end_point)){
-				adbCmdLog(request->buf, request->actual, musb_ep->is_in, "musb_g_rx");
-				//printk(KERN_INFO "adb: musb_g_rx length = 0x%x, actual = 0x%x, packet_sz = 0x%x \n", request->length, request->actual, musb_ep->packet_sz);
-			}
-		}
-		//__ADB_DEBUG__ end
 
 		musb_g_giveback(musb_ep, request, 0);
 		/*
@@ -1501,12 +1129,6 @@ static int musb_gadget_enable(struct usb_ep *ep,
 	if (!ep || !desc)
 		return -EINVAL;
 
-	if(bitdebug_enabled == 1)
-	{
-		unsigned int ret;
-		ret = kfifo_alloc(&fifo, PAGE_SIZE, GFP_KERNEL);
-		spin_lock_init(&debugLock);
-	}
 
 	musb_ep = to_musb_ep(ep);
 	hw_ep = musb_ep->hw_ep;
@@ -1797,9 +1419,7 @@ static int musb_gadget_queue(struct usb_ep *ep, struct usb_request *req,
 	struct musb		*musb;
 	int			status = 0;
 	unsigned long		lockflags;
-	//__ADB_DEBUG__ start
-	int adbStatus = 0;
-	//__ADB_DEBUG__ end
+
 
 	if (!ep || !req)
 		return -EINVAL;
@@ -1815,13 +1435,7 @@ static int musb_gadget_queue(struct usb_ep *ep, struct usb_request *req,
 	if (request->ep != musb_ep)
 		return -EINVAL;
 
-	//__ADB_DEBUG__ start
-	if(bitdebug_enabled == 1){
-		adbStatus = adbDegInfoHandle(ep, req, "musb_gadget_queue");
-		if (-1 != adbStatus)
-			return adbStatus;
-	}
-	//__ADB_DEBUG__ end
+
 
 	DBG(2, "<== to %s request=%p\n", ep->name, req);
 
